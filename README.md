@@ -61,6 +61,18 @@ ivms/<camera>/<YYYY>/<MM>/<DD>/<camera>_<YYYY-MM-DD>_<HHMM>-<HHMM>.mp4
 
 Each video has an adjacent `.mp4.json` manifest. Resumable job state is stored as `job_<id>.json` in the selected temporary directory.
 
+## Visual audit history
+
+Open **4. Auditoría** to review the latest known result for every camera and recording date. The view combines the persistent activity log with resumable job state and provides:
+
+- Totals for completed, empty, failed, and cancelled transfers.
+- Search by camera, recording date, detail, or object path.
+- A status filter and color-coded results.
+- Size, Backblaze object path, SHA-256, error detail, update time, and local evidence source.
+- Shortcuts to open the persistent log and the configured temporary directory.
+
+The view refreshes when opened, when **Actualizar** is selected, and after a batch finishes. Audit metadata never includes DVR/NVR hosts, cloud endpoints, bucket names, usernames, or credentials.
+
 ## Recovery behavior
 
 - Restart the same job parameters to reuse completed download segments and uploaded multipart parts.

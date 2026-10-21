@@ -61,6 +61,18 @@ ivms/<camara>/<AAAA>/<MM>/<DD>/<camara>_<AAAA-MM-DD>_<HHMM>-<HHMM>.mp4
 
 Cada video tiene un manifiesto contiguo `.mp4.json`. El estado reanudable se guarda como `job_<id>.json` en la carpeta temporal seleccionada.
 
+## Historial visual de auditoría
+
+Abre **4. Auditoría** para consultar el último resultado conocido de cada cámara y fecha grabada. La vista combina el registro persistente con los estados reanudables y permite:
+
+- Ver totales de transferencias completadas, sin grabación, con error o canceladas.
+- Buscar por cámara, fecha grabada, detalle o ruta del objeto.
+- Filtrar por estado y reconocer resultados mediante colores.
+- Consultar tamaño, ruta en Backblaze, SHA-256, error, fecha de actualización y fuente local de evidencia.
+- Abrir directamente el registro persistente o la carpeta temporal configurada.
+
+La vista se actualiza al abrirla, al seleccionar **Actualizar** y después de terminar un lote. Los metadatos de auditoría nunca incluyen hosts del DVR/NVR, endpoints, nombres de bucket, usuarios ni credenciales.
+
 ## Recuperación
 
 - Reinicia el trabajo con los mismos parámetros para reutilizar segmentos descargados y partes multipartes ya cargadas.
