@@ -30,7 +30,15 @@ class JobStateStore:
         job_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         self.path = job.spool_dir / f"job_{job_id}.json"
         self._lock = threading.Lock()
-        self.data: dict[str, Any] = {"version": 2, "job_id": job_id, "days": {}}
+        audit_metadata = {
+            "camera_name": job.camera.camera_name,
+            "channel": job.camera.channel,
+            "start_date": job.start_date.isoformat(),
+            "end_date": job.end_date.isoformat(),
+            "start_time": job.start_time.isoformat(timespec="minutes"),
+            "end_time": job.end_time.isoformat(timespec="minutes"),
+        }
+        self.data: dict[str, Any] = {"version": 3, "job_id": job_id, "job": audit_metadata, "days": {}}
         source_path = self.path
         legacy_id = hashlib.sha256("|".join(common_identity).encode("utf-8")).hexdigest()[:16]
         legacy_path = job.spool_dir / f"job_{legacy_id}.json"
@@ -41,7 +49,7 @@ class JobStateStore:
                 loaded = json.loads(source_path.read_text(encoding="utf-8"))
                 if loaded.get("job_id") in {job_id, legacy_id}:
                     self.data = loaded
-                    self.data.update({"version": 2, "job_id": job_id})
+                    self.data.update({"version": 3, "job_id": job_id, "job": audit_metadata})
             except (OSError, json.JSONDecodeError):
                 pass
 

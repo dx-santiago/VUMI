@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import shutil
 import threading
@@ -14,6 +15,7 @@ try:
 except ImportError:  # pragma: no cover
     DateEntry = None
 
+from .audit import AuditRecord, load_audit_records
 from .cloud import B2MultipartClient, normalize_endpoint, validate_cameras
 from .config import app_dir, camera_entries, load_config, load_secret, save_config, save_secret
 from .isapi import IsapiClient
@@ -78,10 +80,12 @@ class App(tk.Tk):
         self.camera_tab = ttk.Frame(self.notebook, padding=10)
         self.settings_tab = ttk.Frame(self.notebook, padding=10)
         self.progress_tab = ttk.Frame(self.notebook, padding=10)
+        self.audit_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.camera_tab, text="1. Cámaras")
         self.notebook.add(self.settings_tab, text="2. Destino y rango")
         self.notebook.add(self.progress_tab, text="3. Progreso")
-        for tab in (self.camera_tab, self.settings_tab, self.progress_tab):
+        self.notebook.add(self.audit_tab, text="4. Auditoría")
+        for tab in (self.camera_tab, self.settings_tab, self.progress_tab, self.audit_tab):
             tab.columnconfigure(0, weight=1)
 
         nvr = ttk.LabelFrame(self.camera_tab, text="Conexión al grabador", padding=10)
@@ -230,7 +234,88 @@ class App(tk.Tk):
         self.progress_tab.rowconfigure(1, weight=1)
         self.log = tk.Text(self.progress_tab, height=7, state="disabled", wrap="word")
         self.log.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self._build_audit_tab()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_audit_tab(self) -> None:
+        filters = ttk.LabelFrame(self.audit_tab, text="Consulta de transferencias", padding=9)
+        filters.grid(row=0, column=0, sticky="ew")
+        filters.columnconfigure(1, weight=1)
+
+        self.audit_search = tk.StringVar()
+        self.audit_status = tk.StringVar(value="Todos")
+        ttk.Label(filters, text="Buscar").grid(row=0, column=0, sticky="w")
+        search = ttk.Entry(filters, textvariable=self.audit_search)
+        search.grid(row=0, column=1, sticky="ew", padx=(6, 12))
+        ttk.Label(filters, text="Estado").grid(row=0, column=2, sticky="w")
+        status = ttk.Combobox(
+            filters,
+            textvariable=self.audit_status,
+            values=("Todos", "Completado", "Sin grabación", "Error", "Cancelado", "Pendiente", "En proceso"),
+            width=17,
+            state="readonly",
+        )
+        status.grid(row=0, column=3, padx=(6, 12))
+        ttk.Button(filters, text="Actualizar", command=self._refresh_audit).grid(row=0, column=4)
+        ttk.Button(filters, text="Abrir registro", command=self._open_activity_log).grid(row=0, column=5, padx=(6, 0))
+        ttk.Button(filters, text="Abrir temporales", command=self._open_spool_dir).grid(row=0, column=6, padx=(6, 0))
+
+        self.audit_summary = tk.StringVar(value="Sin registros cargados")
+        ttk.Label(self.audit_tab, textvariable=self.audit_summary, style="Subtitle.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(8, 5)
+        )
+
+        table = ttk.Frame(self.audit_tab)
+        table.grid(row=2, column=0, sticky="nsew")
+        table.columnconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1)
+        self.audit_tree = ttk.Treeview(
+            table,
+            columns=("timestamp", "camera", "day", "status", "size", "detail"),
+            show="headings",
+            selectmode="browse",
+        )
+        headings = {
+            "timestamp": "Última actualización",
+            "camera": "Cámara",
+            "day": "Fecha grabada",
+            "status": "Estado",
+            "size": "Tamaño",
+            "detail": "Detalle",
+        }
+        for name, label in headings.items():
+            self.audit_tree.heading(name, text=label)
+        self.audit_tree.column("timestamp", width=150, anchor="center", stretch=False)
+        self.audit_tree.column("camera", width=150)
+        self.audit_tree.column("day", width=105, anchor="center", stretch=False)
+        self.audit_tree.column("status", width=115, anchor="center", stretch=False)
+        self.audit_tree.column("size", width=85, anchor="e", stretch=False)
+        self.audit_tree.column("detail", width=410)
+        self.audit_tree.tag_configure("Completado", foreground="#18733b")
+        self.audit_tree.tag_configure("Sin grabación", foreground="#5b6573")
+        self.audit_tree.tag_configure("Error", foreground="#b42318")
+        self.audit_tree.tag_configure("Cancelado", foreground="#a15c00")
+        self.audit_tree.tag_configure("Pendiente", foreground="#5b6573")
+        self.audit_tree.tag_configure("En proceso", foreground="#005ea8")
+        self.audit_tree.grid(row=0, column=0, sticky="nsew")
+        vertical = ttk.Scrollbar(table, orient="vertical", command=self.audit_tree.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(table, orient="horizontal", command=self.audit_tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.audit_tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+
+        detail_box = ttk.LabelFrame(self.audit_tab, text="Detalle del registro", padding=7)
+        detail_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        detail_box.columnconfigure(0, weight=1)
+        self.audit_detail = tk.Text(detail_box, height=7, state="disabled", wrap="word")
+        self.audit_detail.grid(row=0, column=0, sticky="ew")
+        self.audit_tab.rowconfigure(2, weight=1)
+        self.audit_records: list[AuditRecord] = []
+        self.audit_rows: dict[str, AuditRecord] = {}
+        self.audit_search.trace_add("write", lambda *_args: self._apply_audit_filters())
+        status.bind("<<ComboboxSelected>>", lambda _event: self._apply_audit_filters())
+        self.audit_tree.bind("<<TreeviewSelect>>", self._show_audit_detail)
+        self.notebook.bind("<<NotebookTabChanged>>", self._audit_tab_selected, add=True)
 
     def _camera_tree(self, parent) -> ttk.Treeview:
         tree = ttk.Treeview(
@@ -300,6 +385,125 @@ class App(tk.Tk):
                 continue
         self._update_camera_counts()
         self._update_space()
+        self._refresh_audit()
+
+    def _audit_paths(self) -> tuple[Path, Path]:
+        log_path = app_dir() / "activity.log"
+        spool_value = self.values.get("spool_dir")
+        spool_dir = Path(spool_value.get()).expanduser() if spool_value and spool_value.get().strip() else Path.cwd() / "spool"
+        return log_path, spool_dir
+
+    def _refresh_audit(self) -> None:
+        try:
+            log_path, spool_dir = self._audit_paths()
+            self.audit_records = load_audit_records(log_path, spool_dir)
+            self._apply_audit_filters()
+        except Exception as exc:
+            self.audit_records = []
+            self._apply_audit_filters()
+            self._set_audit_detail(f"No fue posible cargar la auditoría:\n{exc}")
+
+    def _apply_audit_filters(self) -> None:
+        if not hasattr(self, "audit_tree"):
+            return
+        query = self.audit_search.get().strip().casefold()
+        status = self.audit_status.get()
+        visible = []
+        for record in self.audit_records:
+            searchable = " ".join(
+                (record.camera, record.day, record.status, record.detail, record.object_key, record.error)
+            ).casefold()
+            if query and query not in searchable:
+                continue
+            if status != "Todos" and record.status != status:
+                continue
+            visible.append(record)
+
+        self.audit_tree.delete(*self.audit_tree.get_children())
+        self.audit_rows.clear()
+        for index, record in enumerate(visible):
+            iid = f"audit-{index}"
+            self.audit_rows[iid] = record
+            self.audit_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    record.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                    record.camera,
+                    record.day,
+                    record.status,
+                    record.size_text,
+                    record.detail,
+                ),
+                tags=(record.status,),
+            )
+
+        counts = {name: sum(item.status == name for item in visible) for name in ("Completado", "Sin grabación", "Error", "Cancelado")}
+        latest = visible[0].timestamp.strftime("%Y-%m-%d %H:%M:%S") if visible else "—"
+        self.audit_summary.set(
+            f"Mostrados: {len(visible)}  ·  Completados: {counts['Completado']}  ·  "
+            f"Sin grabación: {counts['Sin grabación']}  ·  Errores: {counts['Error']}  ·  "
+            f"Cancelados: {counts['Cancelado']}  ·  Último registro: {latest}"
+        )
+        if visible:
+            first = self.audit_tree.get_children()[0]
+            self.audit_tree.selection_set(first)
+            self.audit_tree.focus(first)
+            self._show_audit_detail()
+        else:
+            self._set_audit_detail("No hay registros que coincidan con los filtros.")
+
+    def _show_audit_detail(self, _event=None) -> None:
+        selection = self.audit_tree.selection()
+        if not selection:
+            return
+        record = self.audit_rows.get(selection[0])
+        if record is None:
+            return
+        lines = [
+            f"Última actualización: {record.timestamp:%Y-%m-%d %H:%M:%S}",
+            f"Cámara: {record.camera}",
+            f"Fecha grabada: {record.day}",
+            f"Estado: {record.status}",
+            f"Tamaño: {record.size_text}",
+            f"Detalle: {record.detail or '—'}",
+            f"Ruta del objeto: {record.object_key or '—'}",
+            f"SHA-256: {record.sha256 or '—'}",
+            f"Error: {record.error or '—'}",
+            f"Fuente local: {record.source or '—'}",
+        ]
+        self._set_audit_detail("\n".join(lines))
+
+    def _set_audit_detail(self, value: str) -> None:
+        self.audit_detail.configure(state="normal")
+        self.audit_detail.delete("1.0", "end")
+        self.audit_detail.insert("1.0", value)
+        self.audit_detail.configure(state="disabled")
+
+    def _audit_tab_selected(self, _event=None) -> None:
+        if self.notebook.select() == str(self.audit_tab):
+            self._refresh_audit()
+
+    def _open_activity_log(self) -> None:
+        log_path, _ = self._audit_paths()
+        if not log_path.is_file():
+            messagebox.showinfo("Auditoría", "Todavía no existe un registro de actividad.")
+            return
+        try:
+            os.startfile(log_path)
+        except OSError as exc:
+            messagebox.showerror("Auditoría", f"No fue posible abrir el registro:\n{exc}")
+
+    def _open_spool_dir(self) -> None:
+        _, spool_dir = self._audit_paths()
+        if not spool_dir.is_dir():
+            messagebox.showinfo("Auditoría", "La carpeta temporal configurada no existe.")
+            return
+        try:
+            os.startfile(spool_dir)
+        except OSError as exc:
+            messagebox.showerror("Auditoría", f"No fue posible abrir la carpeta temporal:\n{exc}")
 
     def _save(self) -> None:
         data = {name: variable.get().strip() for name, variable in self.values.items() if name not in {"nvr_password", "key_id", "application_key"}}
@@ -752,6 +956,7 @@ class App(tk.Tk):
                     self.detect_button.configure(state="normal")
                     self.cancel_button.configure(state="disabled")
                     self.current_status.configure(text="Trabajo finalizado")
+                    self._refresh_audit()
                     messagebox.showinfo("Trabajo finalizado", self._result_summary(event[1]))
                 elif kind == "fatal":
                     self.start_button.configure(state="normal")
