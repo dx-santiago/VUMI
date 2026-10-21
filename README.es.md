@@ -8,7 +8,8 @@ Las cargas son multipartes y reanudables. Antes de eliminar un video local termi
 
 ## ¿Para qué sirve?
 
-- Transferir grabaciones de uno o varios canales Hikvision a almacenamiento privado en la nube.
+- Guardar varios perfiles de conexión Hikvision DVR/NVR en un baúl local.
+- Transferir cámaras de uno o varios grabadores en un único lote centralizado.
 - Procesar las cámaras secuencialmente para limitar la carga del DVR/NVR, la red y el disco.
 - Reanudar descargas y cargas multipartes interrumpidas usando el estado local.
 - Evitar sobrescrituras silenciosas comparando el tamaño y el SHA-256 del objeto.
@@ -45,21 +46,24 @@ Si PowerShell bloquea la activación del entorno virtual, permite scripts firmad
 
 ## Configuración y uso
 
-1. Ingresa el host del DVR/NVR, los puertos HTTP y RTSP, el usuario, la contraseña y el desfase UTC. Para Colombia usa `-05:00`.
-2. Selecciona **Probar NVR** y luego **Detectar cámaras**. Mueve a la lista derecha todas las cámaras que quieras procesar. También puedes agregarlas manualmente cuando el firmware no permita detectarlas.
-3. Ingresa el endpoint S3 de Backblaze, el nombre del bucket, el Key ID y la Application Key; después selecciona **Probar Backblaze**.
-4. Elige el rango de fechas, la franja horaria diaria, una carpeta temporal y la carpeta de FFmpeg si no está en `PATH`.
-5. Selecciona **Estimar** para consultar el tamaño esperado y luego inicia la transferencia tras revisar el resumen.
+1. En **Baúl de DVRs**, crea o selecciona un perfil, asígnale un nombre reconocible e ingresa su host, puertos, usuario, contraseña y desfase UTC. Para Colombia usa `-05:00`.
+2. Selecciona **Guardar DVR**, **Probar NVR** y luego **Detectar cámaras**. La detección reemplaza el catálogo de ese perfil para no conservar accidentalmente cámaras de otro grabador.
+3. Mueve a la lista derecha las cámaras requeridas de ese DVR. Cambia de perfil y repite el proceso para cada grabador que participará. La selección se conserva por DVR y la etiqueta muestra el total del lote centralizado.
+4. Ingresa el endpoint S3 de Backblaze, el bucket, el Key ID y la Application Key; después selecciona **Probar Backblaze**.
+5. Elige el rango de fechas, la franja diaria, una carpeta temporal y la carpeta de FFmpeg si no está en `PATH`.
+6. Selecciona **Estimar** para consultar todos los DVR seleccionados y luego inicia la transferencia unificada tras revisar el resumen.
 
 Solo se procesan los días de lunes a viernes. Los festivos no se excluyen automáticamente.
 
 Los objetos usan la siguiente estructura:
 
 ```text
-ivms/<camara>/<AAAA>/<MM>/<DD>/<camara>_<AAAA-MM-DD>_<HHMM>-<HHMM>.mp4
+ivms/<dvr>/<camara>/<AAAA>/<MM>/<DD>/<camara>_<AAAA-MM-DD>_<HHMM>-<HHMM>.mp4
 ```
 
-Cada video tiene un manifiesto contiguo `.mp4.json`. El estado reanudable se guarda como `job_<id>.json` en la carpeta temporal seleccionada.
+El DVR original migrado conserva su estructura anterior `ivms/<camara>/...` para mantener la reanudación y evitar cargas duplicadas. Los perfiles nuevos usan la estructura con DVR mostrada arriba. Cada video tiene un manifiesto contiguo `.mp4.json`. El estado reanudable se guarda como `job_<id>.json` en la carpeta temporal seleccionada.
+
+Los DVR y sus cámaras se procesan secuencialmente dentro del mismo lote para controlar el uso de red, disco y grabadores. Un error en un origen queda aislado y no detiene los demás DVR.
 
 ## Historial visual de auditoría
 
@@ -83,7 +87,7 @@ La vista se actualiza al abrirla, al seleccionar **Actualizar** y después de te
 
 ## Seguridad y privacidad
 
-- Las contraseñas del DVR/NVR y las credenciales de Backblaze se guardan mediante el Administrador de credenciales de Windows usando `keyring`.
+- La contraseña de cada DVR/NVR y las credenciales de Backblaze se guardan por separado mediante el Administrador de credenciales de Windows usando `keyring`.
 - Las preferencias no secretas se guardan en `%APPDATA%\IVMSBackblazeDownloader\config.json` y no forman parte del repositorio.
 - Los archivos de ejecución, logs, videos temporales, estados de trabajo, configuraciones locales y formatos comunes de credenciales están excluidos de Git.
 - Usa una clave exclusiva de Backblaze, restringida al bucket de destino y con los permisos mínimos necesarios para listar, leer y escribir archivos. Mantén el bucket privado y nunca publiques endpoints, hosts, credenciales ni manifiestos generados.

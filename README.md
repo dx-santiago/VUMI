@@ -8,7 +8,8 @@ Uploads are multipart and resumable. Before removing a completed local video, VU
 
 ## What it is for
 
-- Move recordings from one or more Hikvision channels to private cloud storage.
+- Keep multiple Hikvision DVR/NVR connection profiles in a local vault.
+- Move recordings from cameras across one or more recorders in a single centralized batch.
 - Process cameras sequentially to limit DVR/NVR, network, and disk load.
 - Resume interrupted downloads and multipart uploads from local state.
 - Avoid silent overwrites by comparing the object size and SHA-256 checksum.
@@ -45,21 +46,24 @@ If PowerShell blocks virtual-environment activation, either allow locally signed
 
 ## Configuration and use
 
-1. Enter the DVR/NVR host, HTTP and RTSP ports, username, password, and UTC offset. For Colombia, use `-05:00`.
-2. Select **Probar NVR**, then **Detectar cámaras**. Move every camera to process into the right-hand list. Cameras can also be added manually when the firmware does not expose discovery.
-3. Enter the Backblaze S3 endpoint, bucket name, Key ID, and Application Key, then select **Probar Backblaze**.
-4. Choose the date range, the daily time window, a temporary working directory, and the FFmpeg directory if it is not in `PATH`.
-5. Select **Estimar** to query the expected recording size, then start the transfer after reviewing the summary.
+1. In **Baúl de DVRs**, create or select a recorder profile, give it a recognizable name, and enter its host, ports, username, password, and UTC offset. For Colombia, use `-05:00`.
+2. Select **Guardar DVR**, **Probar NVR**, and then **Detectar cámaras**. Detection replaces that profile's catalog so cameras from another recorder are not retained accidentally.
+3. Move the cameras required from that DVR into its right-hand list. Switch profiles and repeat for every recorder that must participate. Selections remain stored per DVR and the label shows the total centralized batch size.
+4. Enter the Backblaze S3 endpoint, bucket name, Key ID, and Application Key, then select **Probar Backblaze**.
+5. Choose the date range, daily time window, temporary working directory, and FFmpeg directory if it is not in `PATH`.
+6. Select **Estimar** to query all selected DVRs, then start the unified transfer after reviewing the summary.
 
 Only Monday through Friday are processed. Public holidays are not excluded automatically.
 
 Objects use the following layout:
 
 ```text
-ivms/<camera>/<YYYY>/<MM>/<DD>/<camera>_<YYYY-MM-DD>_<HHMM>-<HHMM>.mp4
+ivms/<dvr>/<camera>/<YYYY>/<MM>/<DD>/<camera>_<YYYY-MM-DD>_<HHMM>-<HHMM>.mp4
 ```
 
-Each video has an adjacent `.mp4.json` manifest. Resumable job state is stored as `job_<id>.json` in the selected temporary directory.
+The migrated original DVR keeps its previous `ivms/<camera>/...` layout to preserve resume compatibility and avoid duplicate uploads. New DVR profiles use the namespaced layout above. Each video has an adjacent `.mp4.json` manifest. Resumable job state is stored as `job_<id>.json` in the selected temporary directory.
+
+DVRs and cameras are processed sequentially inside the same batch to keep network, disk, and recorder load controlled. An error from one source remains isolated and does not stop the remaining DVRs.
 
 ## Visual audit history
 
@@ -83,7 +87,7 @@ The view refreshes when opened, when **Actualizar** is selected, and after a bat
 
 ## Security and privacy
 
-- DVR/NVR passwords and Backblaze credentials are stored through Windows Credential Manager via Python `keyring`.
+- Each DVR/NVR password and the Backblaze credentials are stored separately through Windows Credential Manager via Python `keyring`.
 - Non-secret preferences are stored in `%APPDATA%\IVMSBackblazeDownloader\config.json` and are not part of the repository.
 - Runtime files, logs, temporary videos, job state, local configuration, and common credential-file formats are excluded from Git.
 - Use a dedicated Backblaze key restricted to the destination bucket, with only the permissions required to list, read, and write files. Keep the bucket private and never commit real endpoints, hostnames, credentials, or generated job manifests.
