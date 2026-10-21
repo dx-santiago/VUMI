@@ -51,27 +51,37 @@ def safe_component(value: str) -> str:
 def validate_cameras(cameras: list[CameraConfig]) -> None:
     if not cameras:
         raise ValueError("Seleccione al menos una cámara")
-    channels: set[int] = set()
-    names: set[str] = set()
+    channels: set[tuple[str, int]] = set()
+    names: set[tuple[str, str]] = set()
     for camera in cameras:
         if camera.channel <= 0:
             raise ValueError("Los canales deben ser enteros positivos")
         if not camera.camera_name.strip():
             raise ValueError(f"Complete el nombre de la cámara del canal {camera.channel}")
-        normalized = safe_component(camera.camera_name).casefold()
-        if camera.channel in channels:
-            raise ValueError(f"El canal {camera.channel} está repetido")
-        if normalized in names:
+        source = camera.source_id or camera.source_name.casefold()
+        channel_key = (source, camera.channel)
+        name_key = (
+            safe_component(camera.source_name).casefold() if camera.source_name else "",
+            safe_component(camera.camera_name).casefold(),
+        )
+        if channel_key in channels:
+            raise ValueError(f"El canal {camera.channel} está repetido en {camera.source_name or 'el DVR'}")
+        if name_key in names:
             raise ValueError("Dos cámaras seleccionadas producirían la misma ruta en Backblaze")
-        channels.add(camera.channel)
-        names.add(normalized)
+        channels.add(channel_key)
+        names.add(name_key)
 
 
-def object_key(prefix: str, camera: str, day, start_time, end_time) -> str:
+def object_key(prefix: str, camera: str, day, start_time, end_time, source: str = "") -> str:
     root = prefix.strip("/")
     name = safe_component(camera)
+    source_name = safe_component(source) if source else ""
     filename = f"{name}_{day.isoformat()}_{start_time:%H%M}-{end_time:%H%M}.mp4"
-    pieces = [part for part in [root, name, f"{day:%Y}", f"{day:%m}", f"{day:%d}", filename] if part]
+    pieces = [
+        part
+        for part in [root, source_name, name, f"{day:%Y}", f"{day:%m}", f"{day:%d}", filename]
+        if part
+    ]
     return "/".join(pieces)
 
 

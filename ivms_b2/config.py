@@ -84,3 +84,12 @@ def load_secret(name: str) -> dict[str, str]:
         return json.loads(raw)
     except json.JSONDecodeError:
         return {}
+
+
+def delete_secret(name: str) -> None:
+    if keyring is None:
+        return
+    try:
+        keyring.delete_password(APP_NAME, name)
+    except keyring.errors.PasswordDeleteError:
+        pass

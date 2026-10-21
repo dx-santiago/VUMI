@@ -26,12 +26,19 @@ class JobStateStore:
             job.cloud.bucket,
             job.cloud.prefix,
         ]
-        identity = "|".join([common_identity[0], common_identity[1], job.camera.camera_name, *common_identity[2:]])
+        camera_identity = (
+            f"{job.camera.source_id}:{job.camera.camera_name}"
+            if job.camera.storage_source
+            else job.camera.camera_name
+        )
+        identity = "|".join([common_identity[0], common_identity[1], camera_identity, *common_identity[2:]])
         job_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
         self.path = job.spool_dir / f"job_{job_id}.json"
         self._lock = threading.Lock()
         audit_metadata = {
-            "camera_name": job.camera.camera_name,
+            "camera_name": job.camera.display_name,
+            "dvr_name": job.camera.source_name,
+            "dvr_id": job.camera.source_id,
             "channel": job.camera.channel,
             "start_date": job.start_date.isoformat(),
             "end_date": job.end_date.isoformat(),

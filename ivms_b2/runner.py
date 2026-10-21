@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .cloud import B2MultipartClient, object_key
+from .cloud import B2MultipartClient, object_key, safe_component
 from .isapi import IsapiClient, recording_name
 from .media import download_day_http, missing_intervals, probe_media, sha256_file
 from .models import BatchProgressCallback, JobConfig, ProgressCallback, Segment
@@ -71,8 +71,11 @@ class JobRunner:
             window.day,
             self.job.start_time,
             self.job.end_time,
+            self.job.camera.storage_source,
         )
         filename = key.rsplit("/", 1)[-1]
+        if self.job.camera.storage_source:
+            filename = f"{safe_component(self.job.camera.storage_source)}_{filename}"
         local_path = self.job.spool_dir / filename
         self.state.update_day(day_key, object_key=key, local_path=str(local_path), error="")
 
@@ -214,6 +217,7 @@ class JobRunner:
         manifest = {
             "version": 1,
             "status": "completed",
+            "dvr": self.job.camera.source_name,
             "camera": self.job.camera.camera_name,
             "channel": self.job.camera.channel,
             "requested_start": window.start.isoformat(),
@@ -266,7 +270,7 @@ class BatchJobRunner:
     def __init__(
         self,
         jobs: list[JobConfig],
-        nvr_password: str,
+        nvr_password: str | dict[str, str],
         b2_key_id: str,
         b2_application_key: str,
         ffmpeg_dir: str = "",
@@ -292,9 +296,16 @@ class BatchJobRunner:
                 totals["cancelled"] += sum(len(item.windows()) for item in self.jobs[index:])
                 break
             camera = job.camera
+            password = (
+                self.nvr_password.get(camera.source_id, "")
+                if isinstance(self.nvr_password, dict)
+                else self.nvr_password
+            )
+            if not password:
+                raise ValueError(f"Falta la contraseña guardada para {camera.source_name or camera.camera_name}")
             runner = self.runner_class(
                 job,
-                self.nvr_password,
+                password,
                 self.b2_key_id,
                 self.b2_application_key,
                 self.ffmpeg_dir,
@@ -306,7 +317,8 @@ class BatchJobRunner:
             cancelled = result.get("cancelled", 0)
             if self.cancel_event.is_set():
                 cancelled += max(0, task_count - processed)
-            by_camera[str(camera.channel)] = {**result, "cancelled": cancelled, "name": camera.camera_name}
+            camera_key = f"{camera.source_id}:{camera.channel}" if camera.source_id else str(camera.channel)
+            by_camera[camera_key] = {**result, "cancelled": cancelled, "name": camera.display_name}
             for key in ("completed", "empty", "errors"):
                 totals[key] += result.get(key, 0)
             totals["cancelled"] += cancelled

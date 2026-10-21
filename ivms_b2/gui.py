@@ -17,10 +17,11 @@ except ImportError:  # pragma: no cover
 
 from .audit import AuditRecord, load_audit_records
 from .cloud import B2MultipartClient, normalize_endpoint, validate_cameras
-from .config import app_dir, camera_entries, load_config, load_secret, save_config, save_secret
+from .config import app_dir, delete_secret, load_config, load_secret, save_config, save_secret
 from .isapi import IsapiClient
 from .media import find_binary
 from .models import CameraConfig, CloudConfig, DeviceConfig, JobConfig
+from .profiles import load_profiles, new_profile, public_profiles
 from .runner import BatchJobRunner
 
 
@@ -36,6 +37,10 @@ class App(tk.Tk):
         self._last_log_at: dict[str, float] = {}
         self._task_order: dict[str, int] = {}
         self.values: dict[str, tk.StringVar] = {}
+        self.dvr_profiles: list[dict] = []
+        self.active_profile_id = ""
+        self.profile_choice = tk.StringVar()
+        self.profile_name = tk.StringVar()
         self.available_count = tk.StringVar(value="Disponibles (0)")
         self.selected_count = tk.StringVar(value="Para descargar (0)")
         self._active_camera_tree = None
@@ -88,8 +93,25 @@ class App(tk.Tk):
         for tab in (self.camera_tab, self.settings_tab, self.progress_tab, self.audit_tab):
             tab.columnconfigure(0, weight=1)
 
-        nvr = ttk.LabelFrame(self.camera_tab, text="Conexión al grabador", padding=10)
+        nvr = ttk.LabelFrame(self.camera_tab, text="Baúl de DVRs", padding=10)
         nvr.grid(row=0, column=0, sticky="new")
+        nvr.columnconfigure(0, weight=1)
+
+        vault = ttk.Frame(nvr)
+        vault.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        vault.columnconfigure(1, weight=1)
+        ttk.Label(vault, text="DVR guardado").grid(row=0, column=0, sticky="w")
+        self.profile_combo = ttk.Combobox(vault, textvariable=self.profile_choice, state="readonly", width=28)
+        self.profile_combo.grid(row=0, column=1, sticky="ew", padx=(6, 12))
+        self.profile_combo.bind("<<ComboboxSelected>>", self._switch_profile)
+        ttk.Label(vault, text="Nombre").grid(row=0, column=2, sticky="w")
+        ttk.Entry(vault, textvariable=self.profile_name, width=24).grid(row=0, column=3, padx=(6, 12))
+        ttk.Button(vault, text="Nuevo", command=self._new_profile).grid(row=0, column=4)
+        ttk.Button(vault, text="Guardar DVR", command=self._save_profile).grid(row=0, column=5, padx=(6, 0))
+        ttk.Button(vault, text="Eliminar", command=self._delete_profile).grid(row=0, column=6, padx=(6, 0))
+
+        connection = ttk.Frame(nvr)
+        connection.grid(row=1, column=0, sticky="ew")
         fields = [
             ("IP / host", "host", ""),
             ("Puerto HTTP", "http_port", "80"),
@@ -98,14 +120,14 @@ class App(tk.Tk):
             ("Contraseña", "nvr_password", ""),
             ("Zona UTC", "utc_offset", "-05:00"),
         ]
-        self._field_grid(nvr, fields, password_names={"nvr_password"})
+        self._field_grid(connection, fields, password_names={"nvr_password"})
         camera_box = ttk.LabelFrame(nvr, text="Selección de cámaras", padding=8)
         camera_box.grid(row=2, column=0, columnspan=6, sticky="ew", pady=(8, 0))
         camera_box.columnconfigure(0, weight=1)
         camera_box.columnconfigure(2, weight=1)
         ttk.Label(
             camera_box,
-            text="Mueve a la columna derecha todas las cámaras cuyas grabaciones quieres descargar.",
+            text="Selecciona cámaras de este DVR. La selección de los demás perfiles se conserva para el lote centralizado.",
             style="Subtitle.TLabel",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 7))
 
@@ -365,27 +387,166 @@ class App(tk.Tk):
     def _load(self) -> None:
         data = load_config()
         for name, variable in self.values.items():
-            if name in data:
+            if name in data and name not in {"host", "http_port", "rtsp_port", "nvr_user", "nvr_password", "utc_offset"}:
                 variable.set(str(data[name]))
         self._set_date(self.start_date, data.get("start_date", ""))
         self._set_date(self.end_date, data.get("end_date", ""))
-        nvr = load_secret(f"nvr:{self.values['host'].get()}")
         b2 = load_secret(f"b2:{self.values['endpoint'].get()}:{self.values['bucket'].get()}")
-        self.values["nvr_password"].set(nvr.get("password", ""))
         self.values["key_id"].set(b2.get("key_id", ""))
         self.values["application_key"].set(b2.get("application_key", ""))
-        for item in camera_entries(data):
-            try:
-                channel = int(item["channel"])
-                name = str(item.get("camera_name") or f"Camera_{channel}")
-                iid = str(channel)
-                target = self.selected_camera_tree if item.get("selected", False) else self.available_camera_tree
-                target.insert("", "end", iid=iid, values=(channel, name))
-            except (KeyError, TypeError, ValueError, tk.TclError):
-                continue
-        self._update_camera_counts()
+        self.dvr_profiles = load_profiles(data)
+        requested = str(data.get("active_dvr_profile") or "")
+        self.active_profile_id = requested if any(item["id"] == requested for item in self.dvr_profiles) else self.dvr_profiles[0]["id"]
+        self._refresh_profile_combo()
+        self._load_profile(self.active_profile_id)
         self._update_space()
         self._refresh_audit()
+
+    def _profile(self, profile_id: str | None = None) -> dict:
+        target = profile_id or self.active_profile_id
+        for profile in self.dvr_profiles:
+            if profile["id"] == target:
+                return profile
+        raise ValueError("Seleccione un DVR guardado")
+
+    def _refresh_profile_combo(self) -> None:
+        names = [profile["name"] for profile in self.dvr_profiles]
+        self.profile_combo.configure(values=names)
+        if self.active_profile_id:
+            self.profile_choice.set(self._profile()["name"])
+
+    def _load_profile(self, profile_id: str) -> None:
+        profile = self._profile(profile_id)
+        self.active_profile_id = profile["id"]
+        self.profile_choice.set(profile["name"])
+        self.profile_name.set(profile["name"])
+        values = {
+            "host": profile["host"],
+            "http_port": profile["http_port"],
+            "rtsp_port": profile["rtsp_port"],
+            "nvr_user": profile["username"],
+            "utc_offset": profile["utc_offset"],
+        }
+        for name, value in values.items():
+            self.values[name].set(str(value))
+        secret = load_secret(f"dvr:{profile['id']}")
+        if not secret and profile["host"]:
+            secret = load_secret(f"nvr:{profile['host']}")
+        self.values["nvr_password"].set(secret.get("password", ""))
+        self.available_camera_tree.delete(*self.available_camera_tree.get_children())
+        self.selected_camera_tree.delete(*self.selected_camera_tree.get_children())
+        for item in profile.get("cameras", []):
+            channel = int(item["channel"])
+            target = self.selected_camera_tree if item.get("selected", False) else self.available_camera_tree
+            target.insert("", "end", iid=str(channel), values=(channel, item["camera_name"]))
+        self._update_camera_counts()
+
+    def _sync_active_cameras(self) -> None:
+        if not self.active_profile_id:
+            return
+        self._profile()["cameras"] = self._camera_records()
+
+    def _capture_active_profile(self, validate: bool = False, save_password: bool = True) -> dict:
+        profile = self._profile()
+        self._sync_active_cameras()
+        name = self.profile_name.get().strip()
+        if not name:
+            raise ValueError("Asigne un nombre al DVR")
+        if any(item["id"] != profile["id"] and item["name"].casefold() == name.casefold() for item in self.dvr_profiles):
+            raise ValueError("Ya existe un DVR guardado con ese nombre")
+        if profile.get("use_namespace", True) and not profile.get("storage_name"):
+            profile["storage_name"] = name
+        profile.update(
+            {
+                "name": name,
+                "host": self.values["host"].get().strip(),
+                "http_port": self.values["http_port"].get().strip(),
+                "rtsp_port": self.values["rtsp_port"].get().strip(),
+                "username": self.values["nvr_user"].get().strip(),
+                "utc_offset": self.values["utc_offset"].get().strip(),
+            }
+        )
+        if validate:
+            self._device_from_profile(profile)
+            if not self.values["nvr_password"].get():
+                raise ValueError(f"Complete la contraseña de {name}")
+        if save_password and self.values["nvr_password"].get():
+            save_secret(f"dvr:{profile['id']}", {"password": self.values["nvr_password"].get()})
+        self._refresh_profile_combo()
+        return profile
+
+    def _persist_profiles(self) -> None:
+        data = load_config()
+        data["dvr_profiles"] = public_profiles(self.dvr_profiles)
+        data["active_dvr_profile"] = self.active_profile_id
+        data.pop("cameras", None)
+        data.pop("channel", None)
+        data.pop("camera", None)
+        save_config(data)
+
+    def _switch_profile(self, _event=None) -> None:
+        if self.worker and self.worker.is_alive():
+            self._refresh_profile_combo()
+            messagebox.showinfo("Baúl de DVRs", "Espera a que termine la operación activa para cambiar de DVR.")
+            return
+        selected_name = self.profile_choice.get()
+        target = next((item for item in self.dvr_profiles if item["name"] == selected_name), None)
+        if target is None or target["id"] == self.active_profile_id:
+            return
+        try:
+            self._capture_active_profile(save_password=True)
+            self._persist_profiles()
+            self._load_profile(target["id"])
+            self._persist_profiles()
+        except Exception as exc:
+            self._refresh_profile_combo()
+            messagebox.showerror("Baúl de DVRs", str(exc))
+
+    def _new_profile(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("Baúl de DVRs", "Espera a que termine la operación activa para crear otro DVR.")
+            return
+        try:
+            self._capture_active_profile(save_password=True)
+        except Exception:
+            self._sync_active_cameras()
+        existing = {item["name"].casefold() for item in self.dvr_profiles}
+        number = 1
+        while f"dvr {number}" in existing:
+            number += 1
+        profile = new_profile(f"DVR {number}")
+        self.dvr_profiles.append(profile)
+        self.active_profile_id = profile["id"]
+        self._refresh_profile_combo()
+        self._load_profile(profile["id"])
+        self._persist_profiles()
+
+    def _save_profile(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("Baúl de DVRs", "Espera a que termine la operación activa para guardar cambios.")
+            return
+        try:
+            profile = self._capture_active_profile(validate=True, save_password=True)
+            self._persist_profiles()
+            messagebox.showinfo("Baúl de DVRs", f"{profile['name']} quedó guardado.")
+        except Exception as exc:
+            messagebox.showerror("Baúl de DVRs", str(exc))
+
+    def _delete_profile(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("Baúl de DVRs", "Espera a que termine la operación activa para eliminar un DVR.")
+            return
+        profile = self._profile()
+        if not messagebox.askyesno("Eliminar DVR", f"¿Eliminar '{profile['name']}' y su catálogo de cámaras?"):
+            return
+        delete_secret(f"dvr:{profile['id']}")
+        self.dvr_profiles = [item for item in self.dvr_profiles if item["id"] != profile["id"]]
+        if not self.dvr_profiles:
+            self.dvr_profiles.append(new_profile("DVR 1"))
+        self.active_profile_id = self.dvr_profiles[0]["id"]
+        self._refresh_profile_combo()
+        self._load_profile(self.active_profile_id)
+        self._persist_profiles()
 
     def _audit_paths(self) -> tuple[Path, Path]:
         log_path = app_dir() / "activity.log"
@@ -505,45 +666,59 @@ class App(tk.Tk):
         except OSError as exc:
             messagebox.showerror("Auditoría", f"No fue posible abrir la carpeta temporal:\n{exc}")
 
-    def _save(self) -> None:
-        data = {name: variable.get().strip() for name, variable in self.values.items() if name not in {"nvr_password", "key_id", "application_key"}}
+    def _save(self, validate_active: bool = True) -> None:
+        self._capture_active_profile(validate=validate_active, save_password=True)
+        device_fields = {"host", "http_port", "rtsp_port", "nvr_user", "nvr_password", "utc_offset"}
+        data = {
+            name: variable.get().strip()
+            for name, variable in self.values.items()
+            if name not in device_fields | {"key_id", "application_key"}
+        }
         data["start_date"] = self._get_date(self.start_date).isoformat()
         data["end_date"] = self._get_date(self.end_date).isoformat()
-        data["cameras"] = self._camera_records()
-        data.pop("channel", None)
-        data.pop("camera", None)
+        data["dvr_profiles"] = public_profiles(self.dvr_profiles)
+        data["active_dvr_profile"] = self.active_profile_id
         save_config(data)
-        save_secret(f"nvr:{data['host']}", {"password": self.values["nvr_password"].get()})
         save_secret(
             f"b2:{data['endpoint']}:{data['bucket']}",
             {"key_id": self.values["key_id"].get(), "application_key": self.values["application_key"].get()},
         )
 
     def _device_config(self) -> DeviceConfig:
+        profile = self._capture_active_profile(validate=False, save_password=False)
+        device = self._device_from_profile(profile)
+        if not self.values["nvr_password"].get():
+            raise ValueError(f"Complete la contraseña de {profile['name']}")
+        return device
+
+    @staticmethod
+    def _device_from_profile(profile: dict) -> DeviceConfig:
         device = DeviceConfig(
-            host=self.values["host"].get().strip(),
-            http_port=int(self.values["http_port"].get()),
-            rtsp_port=int(self.values["rtsp_port"].get()),
-            username=self.values["nvr_user"].get().strip(),
-            utc_offset=self.values["utc_offset"].get().strip(),
+            host=str(profile["host"]).strip(),
+            http_port=int(profile["http_port"]),
+            rtsp_port=int(profile["rtsp_port"]),
+            username=str(profile["username"]).strip(),
+            utc_offset=str(profile["utc_offset"]).strip(),
         )
         if not all([device.host, device.username]):
-            raise ValueError("Complete host y usuario")
-        if not self.values["nvr_password"].get():
-            raise ValueError("Complete la contraseña del NVR")
+            raise ValueError(f"Complete host y usuario de {profile['name']}")
         return device
 
     def _selected_cameras(self) -> list[CameraConfig]:
+        self._sync_active_cameras()
         cameras: list[CameraConfig] = []
-        for iid in self.selected_camera_tree.get_children():
-            raw_channel, raw_name = self.selected_camera_tree.item(iid, "values")
-            channel = int(raw_channel)
-            name = str(raw_name).strip()
-            if channel <= 0:
-                raise ValueError("Los canales deben ser enteros positivos")
-            if not name:
-                raise ValueError(f"Complete el nombre de la cámara del canal {channel}")
-            cameras.append(CameraConfig(channel, name))
+        for profile in self.dvr_profiles:
+            for item in profile.get("cameras", []):
+                if not item.get("selected", False):
+                    continue
+                channel = int(item["channel"])
+                name = str(item["camera_name"]).strip()
+                if channel <= 0:
+                    raise ValueError("Los canales deben ser enteros positivos")
+                if not name:
+                    raise ValueError(f"Complete el nombre de la cámara del canal {channel}")
+                storage_source = profile.get("storage_name", "") if profile.get("use_namespace", True) else ""
+                cameras.append(CameraConfig(channel, name, profile["id"], profile["name"], storage_source))
         validate_cameras(cameras)
         return cameras
 
@@ -560,13 +735,12 @@ class App(tk.Tk):
         return cloud
 
     def _configs(self, require_media: bool = True):
-        device = self._device_config()
+        self._capture_active_profile(validate=False, save_password=True)
         cameras = self._selected_cameras()
         cloud = self._cloud_config()
         start_time = datetime.strptime(self.values["start_time"].get().strip(), "%H:%M").time()
         end_time = datetime.strptime(self.values["end_time"].get().strip(), "%H:%M").time()
         common = {
-            "device": device,
             "cloud": cloud,
             "start_date": self._get_date(self.start_date),
             "end_date": self._get_date(self.end_date),
@@ -574,12 +748,25 @@ class App(tk.Tk):
             "end_time": end_time,
             "spool_dir": Path(self.values["spool_dir"].get()).expanduser().resolve(),
         }
-        jobs = [JobConfig(camera=camera, **common) for camera in cameras]
+        profiles = {item["id"]: item for item in self.dvr_profiles}
+        passwords: dict[str, str] = {}
+        jobs = []
+        for camera in cameras:
+            profile = profiles[camera.source_id]
+            device = self._device_from_profile(profile)
+            secret = load_secret(f"dvr:{profile['id']}")
+            if not secret and profile["host"]:
+                secret = load_secret(f"nvr:{profile['host']}")
+            password = secret.get("password", "")
+            if not password:
+                raise ValueError(f"Falta la contraseña guardada para {profile['name']}")
+            passwords[profile["id"]] = password
+            jobs.append(JobConfig(device=device, camera=camera, **common))
         jobs[0].windows()
         if require_media:
             find_binary("ffmpeg", self.values["ffmpeg_dir"].get().strip())
             find_binary("ffprobe", self.values["ffmpeg_dir"].get().strip())
-        return device, cloud, jobs
+        return cloud, jobs, passwords
 
     def _background(self, action) -> None:
         if self.worker and self.worker.is_alive():
@@ -616,11 +803,12 @@ class App(tk.Tk):
         self.start_button.configure(state="disabled")
         self.estimate_button.configure(state="disabled")
         password = self.values["nvr_password"].get()
+        profile_id = self.active_profile_id
 
         def run():
             try:
                 cameras = IsapiClient(device, password).list_cameras()
-                self.events.put(("cameras_detected", cameras))
+                self.events.put(("cameras_detected", profile_id, cameras))
             except Exception as exc:
                 self.events.put(("camera_detection_error", str(exc)))
 
@@ -739,8 +927,14 @@ class App(tk.Tk):
         )
 
     def _update_camera_counts(self) -> None:
+        self._sync_active_cameras()
+        global_selected = sum(
+            1 for profile in self.dvr_profiles for camera in profile.get("cameras", []) if camera.get("selected", False)
+        )
         self.available_count.set(f"Disponibles ({len(self.available_camera_tree.get_children())})")
-        self.selected_count.set(f"Para descargar ({len(self.selected_camera_tree.get_children())})")
+        self.selected_count.set(
+            f"Este DVR ({len(self.selected_camera_tree.get_children())}) · Lote total ({global_selected})"
+        )
 
     def _camera_records(self) -> list[dict]:
         records = []
@@ -756,12 +950,9 @@ class App(tk.Tk):
         return records
 
     def _persist_camera_catalog(self) -> None:
-        data = load_config()
-        data["cameras"] = self._camera_records()
-        data.pop("channel", None)
-        data.pop("camera", None)
         try:
-            save_config(data)
+            self._sync_active_cameras()
+            self._persist_profiles()
         except OSError:
             pass
 
@@ -775,27 +966,37 @@ class App(tk.Tk):
                 channel, name = tree.item(iid, "values")
                 previous[int(channel)] = (str(name), selected)
             tree.delete(*tree.get_children())
-        detected_channels = set()
         for camera in detected:
-            detected_channels.add(camera.channel)
             name, was_selected = previous.get(camera.channel, (camera.camera_name, False))
             target = self.selected_camera_tree if was_selected else self.available_camera_tree
             target.insert("", "end", iid=str(camera.channel), values=(camera.channel, name))
-        for channel, (name, was_selected) in previous.items():
-            if channel in detected_channels:
-                continue
-            target = self.selected_camera_tree if was_selected else self.available_camera_tree
-            target.insert("", "end", iid=str(channel), values=(channel, name))
         self._update_camera_counts()
+        self._persist_camera_catalog()
+
+    def _apply_detected_to_profile(self, profile_id: str, detected: list[CameraConfig]) -> None:
+        if profile_id == self.active_profile_id:
+            self._apply_detected_cameras(detected)
+            return
+        profile = self._profile(profile_id)
+        previous = {int(item["channel"]): item for item in profile.get("cameras", [])}
+        profile["cameras"] = [
+            {
+                "channel": camera.channel,
+                "camera_name": previous.get(camera.channel, {}).get("camera_name", camera.camera_name),
+                "selected": bool(previous.get(camera.channel, {}).get("selected", False)),
+            }
+            for camera in detected
+        ]
+        self._persist_profiles()
 
     @staticmethod
     def _task_iid(camera: CameraConfig, day: str) -> str:
-        return f"{camera.channel}|{day}"
+        return f"{camera.source_id}|{camera.channel}|{day}"
 
     def _test_cloud(self) -> None:
         try:
             cloud = self._cloud_config()
-            self._save()
+            self._save(validate_active=False)
         except Exception as exc:
             messagebox.showerror("Configuración", str(exc))
             return
@@ -807,21 +1008,20 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             return
         try:
-            device, _, jobs = self._configs(require_media=False)
-            self._save()
+            _, jobs, passwords = self._configs(require_media=False)
+            self._save(validate_active=False)
         except Exception as exc:
             messagebox.showerror("Configuración", str(exc))
             return
-        password = self.values["nvr_password"].get()
         self.notebook.select(self.progress_tab)
         self.tree.delete(*self.tree.get_children())
         self.estimate_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
 
         def estimate_action():
-            client = IsapiClient(device, password)
             total = 0
             for job in jobs:
+                client = IsapiClient(job.device, passwords[job.camera.source_id])
                 for window in job.windows():
                     segments = client.search_recordings(window.start, window.end, job.camera.channel)
                     reported = sum(item.size or 0 for item in segments)
@@ -845,13 +1045,13 @@ class App(tk.Tk):
         if self.worker and self.worker.is_alive():
             return
         try:
-            _, _, jobs = self._configs()
-            self._save()
+            _, jobs, passwords = self._configs()
+            self._save(validate_active=False)
         except Exception as exc:
             messagebox.showerror("Configuración inválida", str(exc))
             return
         first = jobs[0]
-        camera_names = ", ".join(f"{job.camera.camera_name} (canal {job.camera.channel})" for job in jobs)
+        camera_names = ", ".join(f"{job.camera.display_name} (canal {job.camera.channel})" for job in jobs)
         day_count = len(first.windows())
         text = (
             f"Cámaras ({len(jobs)}): {camera_names}\n"
@@ -870,10 +1070,9 @@ class App(tk.Tk):
                 day = window.day.isoformat()
                 iid = self._task_iid(job.camera, day)
                 task_iids.append(iid)
-                self.tree.insert("", "end", iid=iid, values=(job.camera.camera_name, day, "pendiente", ""))
+                self.tree.insert("", "end", iid=iid, values=(job.camera.display_name, day, "pendiente", ""))
         self._task_order = {iid: index for index, iid in enumerate(task_iids)}
         self.cancel_event = threading.Event()
-        nvr_password = self.values["nvr_password"].get()
         key_id = self.values["key_id"].get()
         application_key = self.values["application_key"].get()
         ffmpeg_dir = self.values["ffmpeg_dir"].get().strip()
@@ -886,13 +1085,13 @@ class App(tk.Tk):
             iid = self._task_iid(camera, day)
             local_value = 0.0 if value is None else value
             overall = (self._task_order[iid] + local_value) / len(self._task_order)
-            self.events.put(("progress", iid, camera.camera_name, day, detail, value, overall))
+            self.events.put(("progress", iid, camera.display_name, day, detail, value, overall))
 
         def run():
             try:
                 runner = BatchJobRunner(
                     jobs,
-                    nvr_password,
+                    passwords,
                     key_id,
                     application_key,
                     ffmpeg_dir,
@@ -969,7 +1168,7 @@ class App(tk.Tk):
                     estimate_type = "estimación conservadora" if fallback else "informado por NVR"
                     detail = f"{size / 1024**3:.2f} GiB en {count} segmento(s), {estimate_type}" if size else "Sin grabación"
                     iid = self._task_iid(camera, day)
-                    values = (camera.camera_name, day, "estimado", detail)
+                    values = (camera.display_name, day, "estimado", detail)
                     if self.tree.exists(iid):
                         self.tree.item(iid, values=values)
                     else:
@@ -987,11 +1186,10 @@ class App(tk.Tk):
                     self.detect_button.configure(state="normal")
                     self.start_button.configure(state="normal")
                     self.estimate_button.configure(state="normal")
-                    detected = event[1]
-                    self._apply_detected_cameras(detected)
-                    self._save()
+                    profile_id, detected = event[1], event[2]
+                    self._apply_detected_to_profile(profile_id, detected)
                     self.current_status.configure(
-                        text=f"Se detectaron {len(detected)} cámara(s). Muévelas a 'Para descargar'."
+                        text=f"Se detectaron {len(detected)} cámara(s) en {self._profile(profile_id)['name']}."
                     )
                 elif kind == "camera_detection_error":
                     self.detect_button.configure(state="normal")

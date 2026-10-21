@@ -37,6 +37,13 @@ class DeviceConfig:
 class CameraConfig:
     channel: int
     camera_name: str
+    source_id: str = ""
+    source_name: str = ""
+    storage_source: str = ""
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.source_name} / {self.camera_name}" if self.source_name else self.camera_name
 
 
 @dataclass
